@@ -48,30 +48,149 @@ We have provided an example schema and code that shows how to handle a simple da
 
 Details of how to run and connect to the database are below, together with how to use the example schema and code.
 
-### Notes on completing these tasks
+## Solution for this assignment
 
-- There is no right way to do this. We are interested in the choices that you make, how you justify them, and your development process.
-- Consider how normalized your schema should be, and whether or not you should be using foreign keys to join tables.
-- When you create a container, make sure that you add the container config to the docker compose.yml file, and add your Dockerfile and code to the images folder.
-- Make sure that your code is executable, and if you are working in a scripting language, make sure that your script has an appropriate “hash-bang” line (as featured in our example scripts).
-- Most of the example code uses ORM libraries to connect to the database. This is _not_ essential for the purpose of this test: your code should connect to the database and your queries should be implemented in whatever way you are most comfortable with.
-- Consider what kind of error handling and testing is appropriate.
-- All data input, storage, and output should be in UTF-8. Expect multi-byte characters in the data.
-- The MySQL database storage is ephemeral; it will not persist, so make sure all schema and data queries are repeatable.
-- You may find it easier to work with a subset of the data when developing your ingest.
+### Create SQL Script for Schema
 
-## Pairing activity at your interview
+First, create a file called schema.sql that contains the SQL statements to create your places and people tables.
 
-We will spend 90 minutes at your interview pairing with you. This will include:
+schema.sql:
+```
+CREATE TABLE IF NOT EXISTS places (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  city VARCHAR(100),
+  county VARCHAR(100),
+  country VARCHAR(100)
+);
 
-- Looking at your current code and solution.
-- Modifying your output code, to add several new output files containing different subsets of the data. Be prepared to make different queries of the database, to manipulate data in your programme code, and to output data to disk as JSON and CSV files.
+CREATE TABLE IF NOT EXISTS people (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  given_name VARCHAR(100),
+  family_name VARCHAR(100),
+  date_of_birth DATE,
+  place_of_birth VARCHAR(100)
+);
+```
 
-## Notes on using the images in the git repo
+### Create docker-compose.yml for mysql database, data_loader and summary_output
 
-### Requirements
+```
+services:
+  database:
+    image: mysql
+    environment:
+      - MYSQL_RANDOM_ROOT_PASSWORD=yes
+      - MYSQL_DATABASE=codetest
+      - MYSQL_USER=codetest
+      - MYSQL_PASSWORD=swordfish
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    restart: always
 
-Make sure you have recent versions of Docker and Docker Compose.
+  data_loader:
+    build: ./data_loader
+    depends_on:
+      - database
+
+  summary_output:
+    build: ./summary_output
+    depends_on:
+      - database
+    volumes:
+      - ./output:/app/output
+```
+
+### Create data loader Dockerfile and python script
+
+Dockerfile
+```
+FROM python:3.8-slim
+WORKDIR /app
+COPY ./data /app/data
+COPY ./load_data.py /app/load_data.py
+RUN pip install mysql-connector-python pandas
+CMD ["python", "load_data.py"]
+```
+
+load_data.py
+```
+import pandas as pd
+import mysql.connector
+
+# MySQL connection
+connection = mysql.connector.connect(
+    host='database', user='codetest', password='swordfish', database='codetest'
+)
+cursor = connection.cursor()
+
+# Load places.csv
+places_df = pd.read_csv('data/places.csv')
+for _, row in places_df.iterrows():
+    cursor.execute(
+        "INSERT INTO places (city, county, country) VALUES (%s, %s, %s)", 
+        (row['city'], row['county'], row['country'])
+    )
+connection.commit()
+
+# Load people.csv
+people_df = pd.read_csv('data/people.csv')
+for _, row in people_df.iterrows():
+    cursor.execute(
+        "INSERT INTO people (given_name, family_name, date_of_birth, place_of_birth) VALUES (%s, %s, %s, %s)", 
+        (row['given_name'], row['family_name'], row['date_of_birth'], row['place_of_birth'])
+    )
+connection.commit()
+cursor.close()
+connection.close()
+```
+
+### Create summary output Dockerfile and python script
+
+Dockerfile
+```
+FROM python:3.8-slim
+WORKDIR /app
+COPY ./output_summary.py /app/output_summary.py
+RUN pip install mysql-connector-python
+CMD ["python", "output_summary.py"]
+```
+
+output_summary.py
+```
+import mysql.connector
+import json
+
+# Connect to MySQL
+connection = mysql.connector.connect(
+    host='database',  # This refers to the container name or host name
+    user='codetest',
+    password='swordfish',
+    database='codetest',
+    port=3306  # Specify the port number here
+)
+cursor = connection.cursor()
+
+# Query to count people by country
+query = """
+    SELECT p.country, COUNT(pe.id) as count
+    FROM people pe
+    JOIN places p ON pe.place_of_birth = p.city
+    GROUP BY p.country;
+"""
+cursor.execute(query)
+result = cursor.fetchall()
+
+# Format result into JSON
+output = [{"country": row[0], "count": row[1]} for row in result]
+
+with open('/app/output/summary_output.json', 'w') as f:
+    json.dump(output, f, indent=4)
+
+cursor.close()
+connection.close()
+```
 
 ### Building the images
 
@@ -95,28 +214,21 @@ Optional: if you want to connect to the MySQL database via the command-line clie
 docker compose run database mysql --host=database --user=codetest --password=swordfish codetest
 ```
 
-### Example scripts
+### Starting Data Loader
 
-We have provided example code written in C, Node, Python, R, Ruby, and Swift. These show how to use a programme in a separate Docker container to connect to the database, using an ORM library where appropriate, to load data from a CSV file, and to query data to output as a JSON file. There should be regarded as illustrative; it is fine to use any of these examples as the basis of your own solution, but we would prefer that you use technologies that you feel comfortable with.
-
-Make sure the MySQL database is running, and then load the example schema with:
+Running data loader to load the csv file to tables.
 
 ```
-docker compose run --no-TTY database mysql --host=database --user=codetest --password=swordfish codetest <example_schema.sql
+docker compose run data_loader
 ```
 
-Then make sure that the containers have been built with `docker compose build` and run one or more of the sample programmes with:
+### Starting Summary Output
+
+Running python script to generate a summary JSON output with the count of people born in each country
 
 ```
-docker compose run example-c
-docker compose run example-node
-docker compose run example-python
-docker compose run example-r
-docker compose run example-ruby
-docker compose run example-swift
+docker compose run summary_output
 ```
-
-In each case, the programme loads data from the data/example.csv file into that table, and exports data from the database table to a JSON file in the data folder. Note that the scripts do not truncate the table, so each one you run will add additional content.
 
 ### Cleaning up
 
@@ -125,3 +237,5 @@ To tidy up, bringing down all the containers and deleting them.
 ```
 docker compose down
 ```
+
+
